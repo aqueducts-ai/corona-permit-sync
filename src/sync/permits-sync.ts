@@ -203,13 +203,26 @@ async function bulkProcessNewPermits(
  * 3. For each change: create or update permit in Threefold
  * 4. Update stored state
  */
+/**
+ * Sort permits by permit number descending (latest first).
+ * Permit numbers like B25-00123 contain the year, so descending order = newest first.
+ */
+function sortPermitsLatestFirst(records: PermitRecord[]): PermitRecord[] {
+  return [...records].sort((a, b) => {
+    // Sort descending by permit number (B25 > B24 > B17, etc.)
+    return b.permitNo.localeCompare(a.permitNo);
+  });
+}
+
 export async function processPermitsSync(records: PermitRecord[]): Promise<void> {
   const syncLogId = await createSyncLog('permits');
   let errors = 0;
   let changed = 0;
 
   try {
-    console.log(`[SYNC] Starting permits sync with ${records.length} records`);
+    // Sort permits so latest (newest) are processed first
+    const sortedRecords = sortPermitsLatestFirst(records);
+    console.log(`[SYNC] Starting permits sync with ${sortedRecords.length} records (sorted latest first)`);
 
     // Initialize caches (types, statuses) from Threefold
     await initializePermitCaches();
@@ -219,18 +232,18 @@ export async function processPermitsSync(records: PermitRecord[]): Promise<void>
     const dryRun = !config.permitUpdatesEnabled;
 
     if (isInitialSync) {
-      console.log(`[SYNC] Initial sync detected - bulk importing ${records.length} permits...`);
+      console.log(`[SYNC] Initial sync detected - bulk importing ${sortedRecords.length} permits...`);
 
       if (dryRun) {
         console.log('[SYNC] DRY RUN: Skipping Threefold API calls, only updating local state');
-        await upsertPermitState(records);
-        await completeSyncLog(syncLogId, records.length, records.length, 0);
-        console.log(`[SYNC] Initial sync complete (dry run): ${records.length} permits recorded in local state`);
+        await upsertPermitState(sortedRecords);
+        await completeSyncLog(syncLogId, sortedRecords.length, sortedRecords.length, 0);
+        console.log(`[SYNC] Initial sync complete (dry run): ${sortedRecords.length} permits recorded in local state`);
         return;
       }
 
-      // Bulk import all permits
-      const result = await bulkProcessNewPermits(records);
+      // Bulk import all permits (sorted latest first)
+      const result = await bulkProcessNewPermits(sortedRecords);
       changed = result.created;
       errors = result.failed;
 
@@ -245,22 +258,22 @@ export async function processPermitsSync(records: PermitRecord[]): Promise<void>
       }
 
       // Update local state for all records
-      await upsertPermitState(records);
+      await upsertPermitState(sortedRecords);
 
-      await completeSyncLog(syncLogId, records.length, changed, errors);
-      console.log(`[SYNC] Initial sync complete: ${records.length} total, ${changed} created, ${errors} errors`);
+      await completeSyncLog(syncLogId, sortedRecords.length, changed, errors);
+      console.log(`[SYNC] Initial sync complete: ${sortedRecords.length} total, ${changed} created, ${errors} errors`);
       return;
     }
 
     // Incremental sync - find changes
-    const changes = await diffPermits(records);
+    const changes = await diffPermits(sortedRecords);
     console.log(`[SYNC] Found ${changes.length} changes to process`);
 
     if (changes.length === 0) {
       console.log(`[SYNC] No changes detected, skipping processing`);
       // Still update state to refresh last_seen_at
-      await upsertPermitState(records);
-      await completeSyncLog(syncLogId, records.length, 0, 0);
+      await upsertPermitState(sortedRecords);
+      await completeSyncLog(syncLogId, sortedRecords.length, 0, 0);
       return;
     }
 
@@ -269,9 +282,9 @@ export async function processPermitsSync(records: PermitRecord[]): Promise<void>
 
     if (dryRun) {
       console.log('[SYNC] DRY RUN: Skipping Threefold API calls');
-      await upsertPermitState(records);
-      await completeSyncLog(syncLogId, records.length, changes.length, 0);
-      console.log(`[SYNC] Permits sync complete (dry run): ${records.length} total, ${changes.length} would have changed`);
+      await upsertPermitState(sortedRecords);
+      await completeSyncLog(syncLogId, sortedRecords.length, changes.length, 0);
+      console.log(`[SYNC] Permits sync complete (dry run): ${sortedRecords.length} total, ${changes.length} would have changed`);
       return;
     }
 
@@ -297,12 +310,12 @@ export async function processPermitsSync(records: PermitRecord[]): Promise<void>
     }
 
     // Update stored state for all records
-    console.log(`[SYNC] Updating state for ${records.length} records...`);
-    await upsertPermitState(records);
+    console.log(`[SYNC] Updating state for ${sortedRecords.length} records...`);
+    await upsertPermitState(sortedRecords);
     console.log(`[SYNC] State updated successfully`);
 
-    await completeSyncLog(syncLogId, records.length, changed, errors);
-    console.log(`[SYNC] Permits sync complete: ${records.length} total, ${changed} processed, ${errors} errors`);
+    await completeSyncLog(syncLogId, sortedRecords.length, changed, errors);
+    console.log(`[SYNC] Permits sync complete: ${sortedRecords.length} total, ${changed} processed, ${errors} errors`);
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : 'Unknown error';
     await completeSyncLog(syncLogId, records.length, changed, errors, errorMessage);
