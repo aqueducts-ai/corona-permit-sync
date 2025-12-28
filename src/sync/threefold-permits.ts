@@ -531,6 +531,7 @@ export async function bulkCreatePermits(
 /**
  * Convert a PermitRecord to a Threefold API request.
  * Resolves type/subtype/status IDs using caches.
+ * Only includes fields that have values (API rejects null for optional string fields).
  */
 export async function convertPermitRecordToApiRequest(
   record: PermitRecord
@@ -556,22 +557,25 @@ export async function convertPermitRecordToApiRequest(
     statusId = resolvedStatusId === 0 ? null : resolvedStatusId;
   }
 
+  // Build request with only non-null values (API rejects null for optional string fields)
   const request: CreatePermitRequest = {
     permit_no: record.permitNo,
     permit_type_id: typeId,
-    permit_subtype_id: subtypeId,
-    status_id: statusId,
-    description: record.description || null,
-    notes: record.notes || null,
-    job_value: record.jobValue,
-    address: record.siteAddress || null,
-    apn: record.apn || null,
-    applied_at: record.applied,
-    approved_at: record.approved,
-    issued_at: record.issued,
-    finaled_at: record.finaled,
-    expired_at: record.expired,
   };
+
+  // Only add optional fields if they have values
+  if (subtypeId !== null) request.permit_subtype_id = subtypeId;
+  if (statusId !== null) request.status_id = statusId;
+  if (record.description) request.description = record.description;
+  if (record.notes) request.notes = record.notes;
+  if (record.jobValue !== null) request.job_value = record.jobValue;
+  if (record.siteAddress) request.address = record.siteAddress;
+  if (record.apn) request.apn = record.apn;
+  if (record.applied) request.applied_at = record.applied;
+  if (record.approved) request.approved_at = record.approved;
+  if (record.issued) request.issued_at = record.issued;
+  if (record.finaled) request.finaled_at = record.finaled;
+  if (record.expired) request.expired_at = record.expired;
 
   return { request, typeId, subtypeId, statusId };
 }

@@ -160,12 +160,10 @@ async function bulkProcessNewPermits(
       continue;
     }
 
-    // Bulk create
+    // Bulk create (no batch_id - API requires valid UUID which we don't need for tracking)
     try {
-      const batchId = `sync-${Date.now()}-${batchNum}`;
       const result = await bulkCreatePermits(
-        successfulConversions.map(r => r.request!),
-        batchId
+        successfulConversions.map(r => r.request!)
       );
 
       totalCreated += result.created;
