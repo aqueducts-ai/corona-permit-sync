@@ -2,22 +2,119 @@ import { config } from '../config.js';
 import { PermitRecord } from '../parsers/permits.js';
 
 // Rate limiting: minimum ms between API calls
-const MIN_REQUEST_INTERVAL_MS = 200;
+const MIN_REQUEST_INTERVAL_MS = 500;
 let lastRequestTime = 0;
+
+// Track rate limit state
+let rateLimitResetTime: number | null = null;
+let rateLimitRemaining: number | null = null;
 
 /**
  * Ensure minimum interval between Threefold API calls.
+ * Also checks if we're in a rate-limited state and waits.
  */
 async function rateLimitedRequest(): Promise<void> {
   const now = Date.now();
-  const elapsed = now - lastRequestTime;
 
+  // If we know we're rate limited, wait until reset
+  if (rateLimitResetTime && now < rateLimitResetTime) {
+    const waitTime = rateLimitResetTime - now + 1000; // Add 1s buffer
+    console.log(`[RATE LIMIT] Waiting ${Math.ceil(waitTime / 1000)}s for rate limit reset...`);
+    await new Promise(resolve => setTimeout(resolve, waitTime));
+    rateLimitResetTime = null;
+    rateLimitRemaining = null;
+  }
+
+  // If we're low on remaining requests, slow down
+  if (rateLimitRemaining !== null && rateLimitRemaining < 10) {
+    const extraDelay = (10 - rateLimitRemaining) * 1000; // Up to 10s extra delay
+    console.log(`[RATE LIMIT] Low remaining requests (${rateLimitRemaining}), adding ${extraDelay}ms delay`);
+    await new Promise(resolve => setTimeout(resolve, extraDelay));
+  }
+
+  const elapsed = now - lastRequestTime;
   if (elapsed < MIN_REQUEST_INTERVAL_MS) {
     const waitTime = MIN_REQUEST_INTERVAL_MS - elapsed;
     await new Promise(resolve => setTimeout(resolve, waitTime));
   }
 
   lastRequestTime = Date.now();
+}
+
+/**
+ * Update rate limit tracking from response headers.
+ */
+function updateRateLimitState(response: Response): void {
+  const remaining = response.headers.get('X-RateLimit-Remaining');
+  const reset = response.headers.get('X-RateLimit-Reset');
+
+  if (remaining) {
+    rateLimitRemaining = parseInt(remaining, 10);
+  }
+
+  if (reset) {
+    rateLimitResetTime = new Date(reset).getTime();
+  }
+}
+
+/**
+ * Handle a 429 rate limit response by waiting and retrying.
+ */
+async function handleRateLimit(response: Response): Promise<void> {
+  const retryAfter = response.headers.get('Retry-After');
+  const resetTime = response.headers.get('X-RateLimit-Reset');
+
+  let waitMs = 60000; // Default 1 minute
+
+  if (retryAfter) {
+    waitMs = parseInt(retryAfter, 10) * 1000;
+  } else if (resetTime) {
+    const resetDate = new Date(resetTime).getTime();
+    waitMs = Math.max(resetDate - Date.now() + 1000, 1000);
+  }
+
+  // Cap at 10 minutes
+  waitMs = Math.min(waitMs, 600000);
+
+  console.log(`[RATE LIMIT] Hit rate limit. Waiting ${Math.ceil(waitMs / 1000)}s before retry...`);
+  rateLimitResetTime = Date.now() + waitMs;
+  await new Promise(resolve => setTimeout(resolve, waitMs));
+}
+
+/**
+ * Make an API request with rate limit handling and retries.
+ */
+async function apiRequest(
+  url: string,
+  options: RequestInit,
+  maxRetries = 3
+): Promise<Response> {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    await rateLimitedRequest();
+
+    const response = await fetch(url, options);
+
+    // Update rate limit tracking
+    updateRateLimitState(response);
+
+    // Handle rate limiting
+    if (response.status === 429) {
+      if (attempt < maxRetries - 1) {
+        await handleRateLimit(response);
+        continue;
+      }
+      // On last attempt, throw with helpful message
+      const resetTime = response.headers.get('X-RateLimit-Reset');
+      throw new Error(
+        `Rate limit exceeded after ${maxRetries} retries. ` +
+        `Reset at: ${resetTime || 'unknown'}. Please wait and try again.`
+      );
+    }
+
+    return response;
+  }
+
+  throw new Error('Unexpected: exceeded retry loop');
 }
 
 // ============ Type Definitions ============
@@ -117,9 +214,7 @@ export function clearPermitCaches(): void {
  * Fetch all permit types from Threefold and populate caches.
  */
 export async function fetchPermitTypes(): Promise<ThreefoldPermitType[]> {
-  await rateLimitedRequest();
-
-  const response = await fetch(
+  const response = await apiRequest(
     `${config.threefoldApiUrl}/api/external/permits/types?include_subtypes=true`,
     {
       method: 'GET',
@@ -165,8 +260,6 @@ export async function createPermitType(
   name: string,
   parentId?: number
 ): Promise<ThreefoldPermitType> {
-  await rateLimitedRequest();
-
   const body: Record<string, unknown> = {
     name,
     enabled: true,
@@ -176,7 +269,7 @@ export async function createPermitType(
     body.parent_id = parentId;
   }
 
-  const response = await fetch(
+  const response = await apiRequest(
     `${config.threefoldApiUrl}/api/external/permits/types`,
     {
       method: 'POST',
@@ -273,9 +366,7 @@ export async function getOrCreatePermitSubtype(
  * Fetch all permit statuses from Threefold.
  */
 export async function fetchPermitStatuses(): Promise<ThreefoldPermitStatus[]> {
-  await rateLimitedRequest();
-
-  const response = await fetch(
+  const response = await apiRequest(
     `${config.threefoldApiUrl}/api/external/permits/statuses`,
     {
       method: 'GET',
@@ -311,14 +402,12 @@ export async function createPermitStatus(
   statusName: string,
   statusType: 'applied' | 'approved' | 'issued' | 'finaled' | 'expired' = 'applied'
 ): Promise<ThreefoldPermitStatus> {
-  await rateLimitedRequest();
-
   const body = {
     status_name: statusName,
     status_type: statusType,
   };
 
-  const response = await fetch(
+  const response = await apiRequest(
     `${config.threefoldApiUrl}/api/external/permits/statuses`,
     {
       method: 'POST',
@@ -403,9 +492,7 @@ export async function getOrCreatePermitStatus(statusName: string): Promise<numbe
  * Get a permit by permit number.
  */
 export async function getPermitByNumber(permitNo: string): Promise<ThreefoldPermit | null> {
-  await rateLimitedRequest();
-
-  const response = await fetch(
+  const response = await apiRequest(
     `${config.threefoldApiUrl}/api/external/permits/${encodeURIComponent(permitNo)}`,
     {
       method: 'GET',
@@ -433,9 +520,7 @@ export async function getPermitByNumber(permitNo: string): Promise<ThreefoldPerm
  * Create a single permit in Threefold.
  */
 export async function createPermit(permit: CreatePermitRequest): Promise<ThreefoldPermit> {
-  await rateLimitedRequest();
-
-  const response = await fetch(
+  const response = await apiRequest(
     `${config.threefoldApiUrl}/api/external/permits`,
     {
       method: 'POST',
@@ -463,9 +548,7 @@ export async function updatePermit(
   permitIdOrNo: string | number,
   updates: Partial<CreatePermitRequest>
 ): Promise<ThreefoldPermit> {
-  await rateLimitedRequest();
-
-  const response = await fetch(
+  const response = await apiRequest(
     `${config.threefoldApiUrl}/api/external/permits/${encodeURIComponent(String(permitIdOrNo))}`,
     {
       method: 'PATCH',
@@ -494,8 +577,6 @@ export async function bulkCreatePermits(
   permits: CreatePermitRequest[],
   batchId?: string
 ): Promise<BulkCreateResponse> {
-  await rateLimitedRequest();
-
   const body: Record<string, unknown> = {
     mode: 'bulk',
     permits,
@@ -505,7 +586,7 @@ export async function bulkCreatePermits(
     body.batch_id = batchId;
   }
 
-  const response = await fetch(
+  const response = await apiRequest(
     `${config.threefoldApiUrl}/api/external/permits`,
     {
       method: 'POST',
