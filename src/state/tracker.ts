@@ -2,6 +2,7 @@ import pg from 'pg';
 import { config } from '../config.js';
 import { ViolationRecord } from '../parsers/violations.js';
 import { InspectionRecord } from '../parsers/inspections.js';
+import { PermitRecord, generatePermitHash } from '../parsers/permits.js';
 import type { MatchMethod, MatchConfidence, MatchLogEntry } from '../matching/types.js';
 
 const { Pool } = pg;
@@ -111,6 +112,38 @@ export async function initDb(): Promise<void> {
       );
 
       CREATE INDEX IF NOT EXISTS idx_match_log_external_id ON match_log(external_id);
+    `);
+
+    // Permit state table for tracking permit changes
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS permit_state (
+        permit_no TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        permit_type TEXT,
+        permit_subtype TEXT,
+        applied_at TEXT,
+        approved_at TEXT,
+        issued_at TEXT,
+        finaled_at TEXT,
+        expired_at TEXT,
+        site_address TEXT,
+        description TEXT,
+        notes TEXT,
+        job_value NUMERIC,
+        apn TEXT,
+        raw_data JSONB,
+        content_hash TEXT,
+        threefold_permit_id INTEGER,
+        threefold_type_id INTEGER,
+        threefold_subtype_id INTEGER,
+        threefold_status_id INTEGER,
+        last_seen_at TIMESTAMPTZ DEFAULT NOW(),
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_permit_state_status ON permit_state(status);
+      CREATE INDEX IF NOT EXISTS idx_permit_state_type ON permit_state(permit_type);
+      CREATE INDEX IF NOT EXISTS idx_permit_state_threefold_id ON permit_state(threefold_permit_id);
     `);
 
     console.log('Database schema initialized');
@@ -283,7 +316,7 @@ export interface InspectionStateChange {
 /**
  * Check if a state table is empty (for detecting initial sync).
  */
-export async function isTableEmpty(table: 'violation_state' | 'inspection_state'): Promise<boolean> {
+export async function isTableEmpty(table: 'violation_state' | 'inspection_state' | 'permit_state'): Promise<boolean> {
   const client = await pool.connect();
   try {
     const result = await client.query(`SELECT 1 FROM ${table} LIMIT 1`);
@@ -519,4 +552,214 @@ export async function logMatchAttempt(entry: MatchLogEntry): Promise<void> {
       entry.durationMs,
     ]
   );
+}
+
+// ============ Permit State ============
+
+export interface PermitStateChange {
+  permitNo: string;
+  record: PermitRecord;
+  previousHash: string | null;
+  newHash: string;
+  isNew: boolean;
+  threefoldPermitId: number | null;
+  threefoldTypeId: number | null;
+  threefoldSubtypeId: number | null;
+  threefoldStatusId: number | null;
+}
+
+export interface PermitStateRow {
+  permit_no: string;
+  content_hash: string;
+  threefold_permit_id: number | null;
+  threefold_type_id: number | null;
+  threefold_subtype_id: number | null;
+  threefold_status_id: number | null;
+}
+
+/**
+ * Compare permits against stored state and return changes.
+ * Uses content hash to detect any field changes.
+ */
+export async function diffPermits(records: PermitRecord[]): Promise<PermitStateChange[]> {
+  // Deduplicate by permit_no (last occurrence wins)
+  const deduped = new Map<string, PermitRecord>();
+  for (const record of records) {
+    deduped.set(record.permitNo, record);
+  }
+  const uniqueRecords = Array.from(deduped.values());
+
+  const client = await pool.connect();
+  try {
+    const changes: PermitStateChange[] = [];
+
+    // Get all current states in one query
+    const permitNos = uniqueRecords.map(r => r.permitNo);
+    const result = await client.query(
+      `SELECT permit_no, content_hash, threefold_permit_id, threefold_type_id, threefold_subtype_id, threefold_status_id
+       FROM permit_state WHERE permit_no = ANY($1)`,
+      [permitNos]
+    );
+
+    const currentStates = new Map<string, PermitStateRow>();
+    for (const row of result.rows) {
+      currentStates.set(row.permit_no, row);
+    }
+
+    // Find changes
+    for (const record of uniqueRecords) {
+      const newHash = generatePermitHash(record);
+      const currentState = currentStates.get(record.permitNo);
+
+      if (!currentState) {
+        // New record
+        changes.push({
+          permitNo: record.permitNo,
+          record,
+          previousHash: null,
+          newHash,
+          isNew: true,
+          threefoldPermitId: null,
+          threefoldTypeId: null,
+          threefoldSubtypeId: null,
+          threefoldStatusId: null,
+        });
+      } else if (currentState.content_hash !== newHash) {
+        // Content changed
+        changes.push({
+          permitNo: record.permitNo,
+          record,
+          previousHash: currentState.content_hash,
+          newHash,
+          isNew: false,
+          threefoldPermitId: currentState.threefold_permit_id,
+          threefoldTypeId: currentState.threefold_type_id,
+          threefoldSubtypeId: currentState.threefold_subtype_id,
+          threefoldStatusId: currentState.threefold_status_id,
+        });
+      }
+    }
+
+    return changes;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Update stored permit state.
+ * Uses multi-row INSERT for optimal write performance.
+ */
+export async function upsertPermitState(records: PermitRecord[]): Promise<void> {
+  if (records.length === 0) return;
+
+  // Deduplicate by permit_no (last occurrence wins)
+  const deduped = new Map<string, PermitRecord>();
+  for (const record of records) {
+    deduped.set(record.permitNo, record);
+  }
+  const uniqueRecords = Array.from(deduped.values());
+
+  if (uniqueRecords.length !== records.length) {
+    console.log(`[DB] Deduplicated ${records.length} → ${uniqueRecords.length} permit records (${records.length - uniqueRecords.length} duplicates)`);
+  }
+
+  const BATCH_SIZE = 1000;
+  const client = await pool.connect();
+  const totalBatches = Math.ceil(uniqueRecords.length / BATCH_SIZE);
+  console.log(`[DB] Upserting ${uniqueRecords.length} permit records in ${totalBatches} batches...`);
+
+  try {
+    for (let i = 0; i < uniqueRecords.length; i += BATCH_SIZE) {
+      const batch = uniqueRecords.slice(i, i + BATCH_SIZE);
+
+      // Build multi-row VALUES clause
+      const values: unknown[] = [];
+      const valuePlaceholders: string[] = [];
+
+      batch.forEach((record, idx) => {
+        const offset = idx * 15;
+        valuePlaceholders.push(
+          `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}, $${offset + 15}, NOW())`
+        );
+        values.push(
+          record.permitNo,
+          record.status,
+          record.permitType,
+          record.permitSubType,
+          record.applied,
+          record.approved,
+          record.issued,
+          record.finaled,
+          record.expired,
+          record.siteAddress,
+          record.description,
+          record.jobValue,
+          record.apn,
+          JSON.stringify(record.rawData),
+          generatePermitHash(record)
+        );
+      });
+
+      const query = `
+        INSERT INTO permit_state
+          (permit_no, status, permit_type, permit_subtype, applied_at, approved_at, issued_at, finaled_at, expired_at, site_address, description, job_value, apn, raw_data, content_hash, last_seen_at)
+        VALUES ${valuePlaceholders.join(', ')}
+        ON CONFLICT (permit_no) DO UPDATE SET
+          status = EXCLUDED.status,
+          permit_type = EXCLUDED.permit_type,
+          permit_subtype = EXCLUDED.permit_subtype,
+          applied_at = EXCLUDED.applied_at,
+          approved_at = EXCLUDED.approved_at,
+          issued_at = EXCLUDED.issued_at,
+          finaled_at = EXCLUDED.finaled_at,
+          expired_at = EXCLUDED.expired_at,
+          site_address = EXCLUDED.site_address,
+          description = EXCLUDED.description,
+          job_value = EXCLUDED.job_value,
+          apn = EXCLUDED.apn,
+          raw_data = EXCLUDED.raw_data,
+          content_hash = EXCLUDED.content_hash,
+          last_seen_at = NOW()
+      `;
+
+      await client.query(query, values);
+    }
+
+    console.log(`[DB] Upserted ${uniqueRecords.length} permit records successfully`);
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Update Threefold IDs for a permit after successful API sync.
+ */
+export async function updatePermitThreefoldIds(
+  permitNo: string,
+  threefoldPermitId: number,
+  threefoldTypeId: number,
+  threefoldSubtypeId: number | null,
+  threefoldStatusId: number | null
+): Promise<void> {
+  await pool.query(
+    `UPDATE permit_state SET
+      threefold_permit_id = $2,
+      threefold_type_id = $3,
+      threefold_subtype_id = $4,
+      threefold_status_id = $5
+     WHERE permit_no = $1`,
+    [permitNo, threefoldPermitId, threefoldTypeId, threefoldSubtypeId, threefoldStatusId]
+  );
+}
+
+/**
+ * Get cached Threefold permit ID for a permit.
+ */
+export async function getPermitThreefoldId(permitNo: string): Promise<number | null> {
+  const result = await pool.query(
+    `SELECT threefold_permit_id FROM permit_state WHERE permit_no = $1`,
+    [permitNo]
+  );
+  return result.rows[0]?.threefold_permit_id ?? null;
 }

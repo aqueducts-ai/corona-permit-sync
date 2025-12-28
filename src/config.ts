@@ -43,6 +43,10 @@ export const config = {
   // When disabled: still does DB upserts and logs changes, but skips ticket close/comment API calls
   ticketUpdatesEnabled: optionalEnv('TICKET_UPDATES_ENABLED', 'true') === 'true',
 
+  // Permit updates - set to 'false' to disable Threefold Permits API updates (dry run mode)
+  // When disabled: still does DB upserts and logs changes, but skips permit create/update API calls
+  permitUpdatesEnabled: optionalEnv('PERMIT_UPDATES_ENABLED', 'true') === 'true',
+
   // Workflow step IDs for Corona
   closeViolationStepId: parseInt(optionalEnv('THREEFOLD_CLOSE_STEP_ID', '41'), 10),
 } as const;

@@ -1,0 +1,1218 @@
+openapi: 3.0.3
+info:
+  title: Threefold Permits API
+  description: |
+    External API for managing building permits, licenses, and regulatory approvals.
+    
+    ## Authentication
+    All endpoints require Bearer token authentication. Tokens can be:
+    - **External API tokens** - Organization-specific tokens for third-party integrations
+    - **MCP tokens** - Signed URL tokens for AI agent integrations
+    
+    ## Rate Limits
+    | Operation | Limit | Window |
+    |-----------|-------|--------|
+    | Read (GET) | 1000 requests | 1 minute |
+    | Write (POST/PATCH/DELETE) | 100 requests | 1 minute |
+    | Bulk operations | 10 requests | 1 minute |
+    
+    Rate limit headers are included in all responses:
+    - `X-RateLimit-Limit`: Maximum requests allowed
+    - `X-RateLimit-Remaining`: Requests remaining in window
+    - `X-RateLimit-Reset`: ISO 8601 timestamp when limit resets
+    
+    ## Error Handling
+    All errors follow a consistent format with `success: false` and an `errors` array.
+    
+  version: 1.0.0
+  contact:
+    name: Threefold API Support
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://app.threefold.ai/api/external
+    description: Production
+  - url: http://localhost:3000/api/external
+    description: Local Development
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Permits
+    description: Permit CRUD operations
+  - name: Permit Types
+    description: Permit type and subtype management
+  - name: Permit Statuses
+    description: Permit status definitions
+
+paths:
+  /permits:
+    get:
+      tags:
+        - Permits
+      summary: List permits
+      description: |
+        Retrieve permits with optional filtering, pagination, and search.
+        Results are sorted by creation date (newest first).
+      operationId: getPermits
+      parameters:
+        - name: permit_no
+          in: query
+          description: Filter by exact permit number
+          schema:
+            type: string
+            example: "PERMIT-2025-0001"
+        - name: status_id
+          in: query
+          description: Filter by status ID
+          schema:
+            type: integer
+            example: 1
+        - name: permit_type_id
+          in: query
+          description: Filter by permit type ID
+          schema:
+            type: integer
+            example: 1
+        - name: permit_subtype_id
+          in: query
+          description: Filter by permit subtype ID
+          schema:
+            type: integer
+            example: 5
+        - name: assignee_id
+          in: query
+          description: Filter by assignee user ID
+          schema:
+            type: string
+            example: "user_abc123"
+        - name: applicant_id
+          in: query
+          description: Filter by applicant ID
+          schema:
+            type: string
+            format: uuid
+        - name: apn
+          in: query
+          description: Filter by Assessor's Parcel Number
+          schema:
+            type: string
+            example: "123-456-789"
+        - name: search
+          in: query
+          description: Full-text search across permit_no, description, and address
+          schema:
+            type: string
+            example: "electrical panel"
+        - name: limit
+          in: query
+          description: Maximum results to return (1-100)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          description: Number of results to skip for pagination
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: include_archived
+          in: query
+          description: Include archived (soft-deleted) permits
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Permits retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermitListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    post:
+      tags:
+        - Permits
+      summary: Create permit(s)
+      description: |
+        Create a single permit or bulk import multiple permits.
+        
+        **Single Mode**: Send permit fields directly in the request body.
+        
+        **Bulk Mode**: Set `mode: "bulk"` and provide an array of permits.
+        Bulk operations are limited to 1000 permits per request.
+        
+        If `permit_no` is not provided, one will be auto-generated.
+      operationId: createPermit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/CreatePermitRequest'
+                - $ref: '#/components/schemas/BulkCreatePermitRequest'
+            examples:
+              single:
+                summary: Create single permit
+                value:
+                  permit_type_id: 1
+                  permit_subtype_id: 5
+                  status_id: 1
+                  address: "123 Main St"
+                  description: "New residential construction"
+                  job_value: 250000
+              bulk:
+                summary: Bulk import permits
+                value:
+                  mode: "bulk"
+                  batch_id: "550e8400-e29b-41d4-a716-446655440000"
+                  permits:
+                    - permit_type_id: 1
+                      address: "123 Main St"
+                    - permit_type_id: 1
+                      address: "456 Oak Ave"
+      responses:
+        '201':
+          description: Permit(s) created successfully
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/PermitResponse'
+                  - $ref: '#/components/schemas/BulkCreateResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /permits/{id}:
+    get:
+      tags:
+        - Permits
+      summary: Get permit by ID
+      description: |
+        Retrieve a single permit by its numeric ID or permit number.
+        
+        The `id` parameter accepts either format:
+        - Numeric ID: `123`
+        - Permit number: `PERMIT-2025-0001`
+      operationId: getPermitById
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Permit ID (numeric) or permit number (string)
+          schema:
+            type: string
+            example: "PERMIT-2025-0001"
+      responses:
+        '200':
+          description: Permit retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermitResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    patch:
+      tags:
+        - Permits
+      summary: Update permit
+      description: |
+        Update permit properties. Only provided fields are updated.
+        
+        **Note**: The `permit_no` field cannot be updated after creation
+        to prevent breaking external references.
+        
+        **Subtype Validation**: When changing `permit_type_id` without
+        explicitly setting `permit_subtype_id`, the existing subtype
+        is validated against the new type. Set `permit_subtype_id: null`
+        to clear an incompatible subtype.
+      operationId: updatePermit
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Permit ID (numeric) or permit number (string)
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePermitRequest'
+            examples:
+              status_change:
+                summary: Update status
+                value:
+                  status_id: 2
+              full_update:
+                summary: Multiple field update
+                value:
+                  status_id: 3
+                  permit_assignee: "user_abc123"
+                  notes: "Approved pending inspection"
+      responses:
+        '200':
+          description: Permit updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermitResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    delete:
+      tags:
+        - Permits
+      summary: Archive permit
+      description: |
+        Soft-delete (archive) a permit. Archived permits are excluded
+        from list queries by default but can be included with
+        `include_archived=true`.
+        
+        Archived permits can be restored by updating `archived_at` to null.
+      operationId: archivePermit
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Permit ID (numeric) or permit number (string)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Permit archived successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /permits/types:
+    get:
+      tags:
+        - Permit Types
+      summary: Get permit types
+      description: |
+        Retrieve all permit types for the organization in a hierarchical structure.
+        Parent types include their subtypes in the `children` array.
+      operationId: getPermitTypes
+      parameters:
+        - name: include_subtypes
+          in: query
+          description: Include subtypes in response (default true)
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: Permit types retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermitTypeListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    post:
+      tags:
+        - Permit Types
+      summary: Create permit type
+      description: |
+        Create a new permit type or subtype.
+        
+        To create a subtype, provide `parent_id` referencing an existing type.
+      operationId: createPermitType
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePermitTypeRequest'
+            examples:
+              parent_type:
+                summary: Create parent type
+                value:
+                  name: "Mechanical"
+                  description: "HVAC and mechanical permits"
+                  icon: "fan"
+                  color: "#3B82F6"
+              subtype:
+                summary: Create subtype
+                value:
+                  parent_id: 1
+                  name: "HVAC Installation"
+                  description: "New HVAC system installation"
+      responses:
+        '201':
+          description: Permit type created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermitTypeResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /permits/statuses:
+    get:
+      tags:
+        - Permit Statuses
+      summary: Get permit statuses
+      description: |
+        Retrieve all permit statuses for the organization.
+        Includes both organization-specific and global default statuses.
+      operationId: getPermitStatuses
+      responses:
+        '200':
+          description: Permit statuses retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermitStatusListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    post:
+      tags:
+        - Permit Statuses
+      summary: Create permit status
+      description: Create a new organization-specific permit status.
+      operationId: createPermitStatus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePermitStatusRequest'
+            example:
+              status_name: "Plan Review"
+              status_type: "applied"
+              status_icon: "file-search"
+              status_color: "#F59E0B"
+              sort_order: 2
+      responses:
+        '201':
+          description: Permit status created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermitStatusResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        External API token or MCP signed URL token.
+        
+        Example: `Authorization: Bearer ext_abc123...`
+
+  schemas:
+    Permit:
+      type: object
+      required:
+        - id
+        - permit_no
+        - permit_type_id
+        - organization_id
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: integer
+          description: Unique permit identifier
+          example: 123
+        permit_no:
+          type: string
+          description: Human-readable permit number (auto-generated if not provided)
+          example: "PERMIT-2025-0001"
+        permit_type_id:
+          type: integer
+          description: ID of the permit type (parent category)
+          example: 1
+        permit_subtype_id:
+          type: integer
+          nullable: true
+          description: ID of the permit subtype (optional)
+          example: 5
+        status_id:
+          type: integer
+          nullable: true
+          description: ID of the current status
+          example: 1
+        description:
+          type: string
+          nullable: true
+          description: Detailed description of the permit
+          example: "New residential construction - 3 bedroom home"
+        notes:
+          type: string
+          nullable: true
+          description: Internal notes (not visible to applicants)
+        job_value:
+          type: number
+          nullable: true
+          description: Estimated value of the work in dollars
+          example: 250000
+        address:
+          type: string
+          nullable: true
+          description: Physical address for the permit
+          example: "123 Main St, City, ST 12345"
+        parsed_lat:
+          type: number
+          nullable: true
+          description: Latitude coordinate (-90 to 90)
+          example: 37.7749
+        parsed_lng:
+          type: number
+          nullable: true
+          description: Longitude coordinate (-180 to 180)
+          example: -122.4194
+        apn:
+          type: string
+          nullable: true
+          description: Assessor's Parcel Number
+          example: "123-456-789"
+        gis_data:
+          type: object
+          nullable: true
+          description: Cached GIS intersection data
+          additionalProperties: true
+        applied_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the application was submitted
+        approved_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the permit was approved
+        issued_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the permit was issued
+        finaled_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When final inspection was completed
+        expired_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the permit expired
+        organization_id:
+          type: string
+          description: Organization that owns this permit
+        permit_assignee:
+          type: string
+          nullable: true
+          description: User ID of assigned staff member
+        applicant_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: ID of the applicant
+        created_at:
+          type: string
+          format: date-time
+          description: When the permit was created
+        updated_at:
+          type: string
+          format: date-time
+          description: When the permit was last updated
+        archived_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the permit was archived (null if active)
+        permit_type:
+          $ref: '#/components/schemas/PermitType'
+        permit_subtype:
+          $ref: '#/components/schemas/PermitType'
+        permit_status:
+          $ref: '#/components/schemas/PermitStatus'
+
+    PermitType:
+      type: object
+      required:
+        - id
+        - name
+        - organization_id
+      properties:
+        id:
+          type: integer
+          example: 1
+        name:
+          type: string
+          example: "Building"
+        description:
+          type: string
+          nullable: true
+          example: "General building permits"
+        parent_id:
+          type: integer
+          nullable: true
+          description: ID of parent type (null for parent types)
+        icon:
+          type: string
+          example: "building"
+        color:
+          type: string
+          pattern: "^#[0-9A-Fa-f]{6}$"
+          example: "#3B82F6"
+        is_default:
+          type: boolean
+          default: false
+        enabled:
+          type: boolean
+          default: true
+        sort_order:
+          type: integer
+          default: 0
+        organization_id:
+          type: string
+        children:
+          type: array
+          description: Subtypes (only present on parent types)
+          items:
+            $ref: '#/components/schemas/PermitType'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PermitStatus:
+      type: object
+      required:
+        - id
+        - status_name
+        - status_type
+        - organization_id
+      properties:
+        id:
+          type: integer
+          example: 1
+        status_name:
+          type: string
+          example: "Applied"
+        status_icon:
+          type: string
+          example: "circle-dashed"
+        status_color:
+          type: string
+          example: "#94A3B8"
+        status_type:
+          type: string
+          enum: [applied, approved, issued, finaled, expired]
+          description: Lifecycle stage this status belongs to
+        sort_order:
+          type: integer
+          default: 0
+        organization_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreatePermitRequest:
+      type: object
+      required:
+        - permit_type_id
+      properties:
+        permit_no:
+          type: string
+          description: Custom permit number (auto-generated if not provided)
+        permit_type_id:
+          type: integer
+          minimum: 1
+          description: ID of a parent permit type (not a subtype)
+        permit_subtype_id:
+          type: integer
+          minimum: 1
+          description: ID of a subtype belonging to the permit_type_id
+        status_id:
+          type: integer
+          minimum: 1
+        description:
+          type: string
+        notes:
+          type: string
+        job_value:
+          type: number
+          minimum: 0
+        address:
+          type: string
+        parsed_lat:
+          type: number
+          minimum: -90
+          maximum: 90
+        parsed_lng:
+          type: number
+          minimum: -180
+          maximum: 180
+        apn:
+          type: string
+        applied_at:
+          type: string
+          format: date-time
+        approved_at:
+          type: string
+          format: date-time
+        issued_at:
+          type: string
+          format: date-time
+        finaled_at:
+          type: string
+          format: date-time
+        expired_at:
+          type: string
+          format: date-time
+        permit_assignee:
+          type: string
+        applicant_id:
+          type: string
+          format: uuid
+
+    BulkCreatePermitRequest:
+      type: object
+      required:
+        - mode
+        - permits
+      properties:
+        mode:
+          type: string
+          enum: [bulk]
+          description: Must be "bulk" to trigger bulk mode
+        permits:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/CreatePermitRequest'
+        batch_id:
+          type: string
+          format: uuid
+          description: Optional batch identifier for tracking
+
+    UpdatePermitRequest:
+      type: object
+      description: |
+        All fields are optional. Only provided fields are updated.
+        Fields can be set to `null` to clear them.
+        Note: `permit_no` cannot be updated.
+      properties:
+        permit_type_id:
+          type: integer
+          minimum: 1
+        permit_subtype_id:
+          type: integer
+          minimum: 1
+          nullable: true
+        status_id:
+          type: integer
+          minimum: 1
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        job_value:
+          type: number
+          minimum: 0
+          nullable: true
+        address:
+          type: string
+          nullable: true
+        parsed_lat:
+          type: number
+          minimum: -90
+          maximum: 90
+          nullable: true
+        parsed_lng:
+          type: number
+          minimum: -180
+          maximum: 180
+          nullable: true
+        apn:
+          type: string
+          nullable: true
+        gis_data:
+          type: object
+          nullable: true
+          additionalProperties: true
+        applied_at:
+          type: string
+          format: date-time
+          nullable: true
+        approved_at:
+          type: string
+          format: date-time
+          nullable: true
+        issued_at:
+          type: string
+          format: date-time
+          nullable: true
+        finaled_at:
+          type: string
+          format: date-time
+          nullable: true
+        expired_at:
+          type: string
+          format: date-time
+          nullable: true
+        permit_assignee:
+          type: string
+          nullable: true
+        applicant_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    CreatePermitTypeRequest:
+      type: object
+      required:
+        - name
+      properties:
+        parent_id:
+          type: integer
+          nullable: true
+          description: ID of parent type to create a subtype
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+        icon:
+          type: string
+          description: Lucide icon name
+        color:
+          type: string
+          pattern: "^#[0-9A-Fa-f]{6}$"
+          description: Hex color code
+        is_default:
+          type: boolean
+          default: false
+        enabled:
+          type: boolean
+          default: true
+        sort_order:
+          type: integer
+          default: 0
+
+    CreatePermitStatusRequest:
+      type: object
+      required:
+        - status_name
+        - status_type
+      properties:
+        status_name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        status_icon:
+          type: string
+          description: Lucide icon name (kebab-case)
+        status_color:
+          type: string
+          pattern: "^(#[0-9A-Fa-f]{6}|#[0-9A-Fa-f]{3}|[a-zA-Z]+)$"
+          description: Hex color or color name
+        status_type:
+          type: string
+          enum: [applied, approved, issued, finaled, expired]
+        sort_order:
+          type: integer
+
+    PermitResponse:
+      type: object
+      required:
+        - success
+        - data
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/Permit'
+        meta:
+          type: object
+          properties:
+            processing_time_ms:
+              type: integer
+              example: 45
+
+    PermitListResponse:
+      type: object
+      required:
+        - success
+        - data
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Permit'
+        meta:
+          type: object
+          properties:
+            count:
+              type: integer
+              example: 20
+            limit:
+              type: integer
+              example: 20
+            offset:
+              type: integer
+              example: 0
+            processing_time_ms:
+              type: integer
+              example: 120
+
+    BulkCreateResponse:
+      type: object
+      required:
+        - success
+        - data
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            created:
+              type: integer
+              description: Number of permits successfully created
+              example: 98
+            failed:
+              type: integer
+              description: Number of permits that failed
+              example: 2
+            created_ids:
+              type: array
+              items:
+                type: integer
+              description: IDs of created permits
+            errors:
+              type: array
+              description: |
+                Details for each failed permit. Fields like `permit_no`, 
+                `address`, and `permit_type_id` are echoed from input 
+                (not looked up) for identification.
+              items:
+                type: object
+                properties:
+                  index:
+                    type: integer
+                    description: Zero-based index in input array
+                  error:
+                    type: string
+                    description: Human-readable error message
+                  permit_no:
+                    type: string
+                    description: Echo of input permit_no (if provided)
+                  address:
+                    type: string
+                    description: Echo of input address (if provided)
+                  permit_type_id:
+                    type: integer
+                    description: Echo of input permit_type_id (if provided)
+            batch_id:
+              type: string
+              format: uuid
+              description: Batch ID if provided in request
+        meta:
+          type: object
+          properties:
+            processing_time_ms:
+              type: integer
+
+    PermitTypeResponse:
+      type: object
+      required:
+        - success
+        - data
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/PermitType'
+        meta:
+          type: object
+          properties:
+            processing_time_ms:
+              type: integer
+
+    PermitTypeListResponse:
+      type: object
+      required:
+        - success
+        - data
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PermitType'
+        meta:
+          type: object
+          properties:
+            count:
+              type: integer
+            include_subtypes:
+              type: boolean
+            processing_time_ms:
+              type: integer
+
+    PermitStatusResponse:
+      type: object
+      required:
+        - success
+        - data
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/PermitStatus'
+        meta:
+          type: object
+          properties:
+            processing_time_ms:
+              type: integer
+
+    PermitStatusListResponse:
+      type: object
+      required:
+        - success
+        - data
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PermitStatus'
+        meta:
+          type: object
+          properties:
+            count:
+              type: integer
+            processing_time_ms:
+              type: integer
+
+    SuccessResponse:
+      type: object
+      required:
+        - success
+        - message
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Permit archived successfully"
+        meta:
+          type: object
+          properties:
+            processing_time_ms:
+              type: integer
+
+    ErrorResponse:
+      type: object
+      required:
+        - success
+        - message
+        - errors
+      properties:
+        success:
+          type: boolean
+          example: false
+        message:
+          type: string
+          example: "Validation failed"
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+                example: "permit_type_id"
+              message:
+                type: string
+                example: "Required"
+
+  responses:
+    Unauthorized:
+      description: Authentication required or invalid token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            message: "Authentication required"
+            errors:
+              - path: "authorization"
+                message: "Missing or invalid Authorization header"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            message: "Permit not found"
+            errors:
+              - path: "id"
+                message: "Permit with ID or permit_no 'PERMIT-2025-9999' not found"
+
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            message: "Validation failed"
+            errors:
+              - path: "permit_type_id"
+                message: "Required"
+              - path: "parsed_lat"
+                message: "Number must be between -90 and 90"
+
+    RateLimitExceeded:
+      description: Rate limit exceeded
+      headers:
+        X-RateLimit-Limit:
+          schema:
+            type: string
+          description: Maximum requests allowed
+        X-RateLimit-Remaining:
+          schema:
+            type: string
+          description: Requests remaining (0)
+        X-RateLimit-Reset:
+          schema:
+            type: string
+          description: ISO 8601 timestamp when limit resets
+        Retry-After:
+          schema:
+            type: string
+          description: Seconds until rate limit resets
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+                example: false
+              message:
+                type: string
+                example: "Rate limit exceeded. Limit: 100 requests per hour."
+              rate_limit:
+                type: object
+                properties:
+                  limit:
+                    type: integer
+                  remaining:
+                    type: integer
+                  reset:
+                    type: string
+                    format: date-time
+
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            message: "Internal server error"

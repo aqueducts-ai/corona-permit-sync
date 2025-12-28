@@ -62,3 +62,56 @@ export function normalizeDate(dateStr: string): string {
 
   return `${year}-${mm}-${dd}`;
 }
+
+// ============ Permit External IDs ============
+
+/**
+ * External ID format for permits: permit|{PERMIT_NO}
+ * Example: "permit|B17-01920"
+ *
+ * This is simpler than violations since PERMIT_NO is already unique.
+ */
+export function generatePermitExternalId(permitNo: string): string {
+  return `permit|${permitNo}`;
+}
+
+/**
+ * Extract permit number from an external ID.
+ * Returns null if not a permit external ID.
+ */
+export function extractPermitNoFromExternalId(externalId: string): string | null {
+  if (!externalId.startsWith('permit|')) {
+    return null;
+  }
+  const parts = externalId.split('|');
+  return parts[1] || null;
+}
+
+/**
+ * Normalize permit date from TrakIT format to ISO-8601 format.
+ *
+ * Input: "8/27/2024 12:00:00 AM" or "8/27/2024" or ""
+ * Output: "2024-08-27T00:00:00.000Z" or null
+ *
+ * Returns null for empty/invalid dates (Threefold API expects null, not empty string).
+ */
+export function normalizePermitDate(dateStr: string | undefined | null): string | null {
+  if (!dateStr || dateStr.trim() === '') {
+    return null;
+  }
+
+  // Remove time portion if present
+  const datePart = dateStr.split(' ')[0];
+  const parts = datePart.split('/');
+
+  if (parts.length !== 3) {
+    return null;
+  }
+
+  const [month, day, year] = parts;
+  const mm = month.padStart(2, '0');
+  const dd = day.padStart(2, '0');
+
+  // Return ISO-8601 format for Threefold API
+  return `${year}-${mm}-${dd}T00:00:00.000Z`;
+}

@@ -1,6 +1,7 @@
 export enum ReportType {
   VIOLATIONS = 'violations',
   INSPECTIONS = 'inspections',
+  PERMITS = 'permits',
   UNKNOWN = 'unknown',
 }
 
@@ -10,8 +11,8 @@ export enum ReportType {
  * Expected filenames:
  * - V_Threefold_Violations_and_Cases.csv
  * - V_Threefold_CASE_INSPECTIONS.csv
+ * - V_Threefold_Permits.csv
  * - V_Threefold_Code_Enforcement_Cases.csv (ignored for now)
- * - V_Threefold_Permits.csv (ignored for now)
  */
 export function detectReportType(filename: string): ReportType {
   const lower = filename.toLowerCase();
@@ -24,6 +25,10 @@ export function detectReportType(filename: string): ReportType {
     return ReportType.INSPECTIONS;
   }
 
-  // Code enforcement cases and permits are not processed yet
+  if (lower.includes('permit')) {
+    return ReportType.PERMITS;
+  }
+
+  // Code enforcement cases are not processed yet
   return ReportType.UNKNOWN;
 }

@@ -3,8 +3,10 @@ import busboy from 'busboy';
 import { detectReportType, ReportType } from '../parsers/detect-type.js';
 import { parseViolationsCsv } from '../parsers/violations.js';
 import { parseInspectionsCsv } from '../parsers/inspections.js';
+import { parsePermitsCsv } from '../parsers/permits.js';
 import { processViolationsSync } from '../sync/violations-sync.js';
 import { processInspectionsSync } from '../sync/inspections-sync.js';
+import { processPermitsSync } from '../sync/permits-sync.js';
 
 export const webhookRouter = Router();
 
@@ -71,6 +73,13 @@ webhookRouter.post('/sendgrid', (req, res) => {
     console.log('-'.repeat(60));
 
     try {
+      // Check if this is a permit email (subject contains "permit")
+      const isPermitEmail = email.subject.toLowerCase().includes('permit');
+
+      if (isPermitEmail) {
+        console.log(`[WEBHOOK] Permit email detected (subject contains "permit")`);
+      }
+
       // Process each CSV attachment
       for (const attachment of email.attachments) {
         if (!attachment.filename.endsWith('.csv')) {
@@ -78,10 +87,20 @@ webhookRouter.post('/sendgrid', (req, res) => {
           continue;
         }
 
+        const csvContent = attachment.content.toString('utf-8');
+
+        // If subject contains "permit", process any CSV as permits
+        if (isPermitEmail) {
+          console.log(`[WEBHOOK] Processing as permits: ${attachment.filename}`);
+          const permits = await parsePermitsCsv(csvContent);
+          console.log(`[PARSE] Parsed ${permits.length} permit records`);
+          await processPermitsSync(permits);
+          continue;
+        }
+
+        // Otherwise, use filename-based detection for violations/inspections
         const reportType = detectReportType(attachment.filename);
         console.log(`[WEBHOOK] Processing ${reportType}: ${attachment.filename}`);
-
-        const csvContent = attachment.content.toString('utf-8');
 
         switch (reportType) {
           case ReportType.VIOLATIONS:
@@ -94,6 +113,12 @@ webhookRouter.post('/sendgrid', (req, res) => {
             const inspections = await parseInspectionsCsv(csvContent);
             console.log(`[PARSE] Parsed ${inspections.length} inspection records`);
             await processInspectionsSync(inspections);
+            break;
+
+          case ReportType.PERMITS:
+            const permits = await parsePermitsCsv(csvContent);
+            console.log(`[PARSE] Parsed ${permits.length} permit records`);
+            await processPermitsSync(permits);
             break;
 
           case ReportType.UNKNOWN:
