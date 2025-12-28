@@ -1,38 +1,22 @@
 import { config } from '../config.js';
 import { PermitRecord } from '../parsers/permits.js';
 
-// Rate limiting: minimum ms between API calls
-const MIN_REQUEST_INTERVAL_MS = 500;
+// Rate limiting: 100 requests per minute = ~600ms minimum between requests
+// Using 650ms to be safe
+const MIN_REQUEST_INTERVAL_MS = 650;
 let lastRequestTime = 0;
 
 // Track rate limit state
-let rateLimitResetTime: number | null = null;
 let rateLimitRemaining: number | null = null;
 
 /**
  * Ensure minimum interval between Threefold API calls.
- * Also checks if we're in a rate-limited state and waits.
+ * 100 requests/minute limit = one request every 600ms minimum.
  */
 async function rateLimitedRequest(): Promise<void> {
   const now = Date.now();
-
-  // If we know we're rate limited, wait until reset
-  if (rateLimitResetTime && now < rateLimitResetTime) {
-    const waitTime = rateLimitResetTime - now + 1000; // Add 1s buffer
-    console.log(`[RATE LIMIT] Waiting ${Math.ceil(waitTime / 1000)}s for rate limit reset...`);
-    await new Promise(resolve => setTimeout(resolve, waitTime));
-    rateLimitResetTime = null;
-    rateLimitRemaining = null;
-  }
-
-  // If we're low on remaining requests, slow down
-  if (rateLimitRemaining !== null && rateLimitRemaining < 10) {
-    const extraDelay = (10 - rateLimitRemaining) * 1000; // Up to 10s extra delay
-    console.log(`[RATE LIMIT] Low remaining requests (${rateLimitRemaining}), adding ${extraDelay}ms delay`);
-    await new Promise(resolve => setTimeout(resolve, extraDelay));
-  }
-
   const elapsed = now - lastRequestTime;
+
   if (elapsed < MIN_REQUEST_INTERVAL_MS) {
     const waitTime = MIN_REQUEST_INTERVAL_MS - elapsed;
     await new Promise(resolve => setTimeout(resolve, waitTime));
@@ -46,38 +30,38 @@ async function rateLimitedRequest(): Promise<void> {
  */
 function updateRateLimitState(response: Response): void {
   const remaining = response.headers.get('X-RateLimit-Remaining');
-  const reset = response.headers.get('X-RateLimit-Reset');
-
   if (remaining) {
     rateLimitRemaining = parseInt(remaining, 10);
-  }
-
-  if (reset) {
-    rateLimitResetTime = new Date(reset).getTime();
   }
 }
 
 /**
  * Handle a 429 rate limit response by waiting and retrying.
+ * Since limit is 100/minute, wait ~1 minute for reset.
  */
 async function handleRateLimit(response: Response): Promise<void> {
   const retryAfter = response.headers.get('Retry-After');
   const resetTime = response.headers.get('X-RateLimit-Reset');
 
-  let waitMs = 60000; // Default 1 minute
+  // Default: wait 60 seconds (one rate limit window)
+  let waitMs = 60000;
 
   if (retryAfter) {
+    // Retry-After is in seconds
     waitMs = parseInt(retryAfter, 10) * 1000;
   } else if (resetTime) {
     const resetDate = new Date(resetTime).getTime();
-    waitMs = Math.max(resetDate - Date.now() + 1000, 1000);
+    const timeUntilReset = resetDate - Date.now();
+    // Only use reset time if it's reasonable (< 2 minutes)
+    if (timeUntilReset > 0 && timeUntilReset < 120000) {
+      waitMs = timeUntilReset + 1000; // Add 1s buffer
+    }
   }
 
-  // Cap at 10 minutes
-  waitMs = Math.min(waitMs, 600000);
+  // Cap at 2 minutes (should never need more for 100/minute limit)
+  waitMs = Math.min(waitMs, 120000);
 
   console.log(`[RATE LIMIT] Hit rate limit. Waiting ${Math.ceil(waitMs / 1000)}s before retry...`);
-  rateLimitResetTime = Date.now() + waitMs;
   await new Promise(resolve => setTimeout(resolve, waitMs));
 }
 
