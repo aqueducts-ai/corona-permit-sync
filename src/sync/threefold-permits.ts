@@ -1,9 +1,9 @@
 import { config } from '../config.js';
 import { PermitRecord } from '../parsers/permits.js';
 
-// Rate limiting: 100 requests per minute = ~600ms minimum between requests
-// Using 650ms to be safe
-const MIN_REQUEST_INTERVAL_MS = 650;
+// Rate limiting: 600 requests per minute = ~100ms minimum between requests
+// Using 110ms to be safe
+const MIN_REQUEST_INTERVAL_MS = 110;
 let lastRequestTime = 0;
 
 // Track rate limit state
