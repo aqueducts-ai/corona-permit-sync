@@ -112,13 +112,13 @@ async function processPermitChange(change: PermitStateChange): Promise<{
 
 /**
  * Bulk process new permits for initial sync.
- * Processes in batches of 500 to stay well under the 1000 limit.
+ * Processes in batches of 100 for API calls (within 1000 record processing batches).
  */
 async function bulkProcessNewPermits(
   records: PermitRecord[],
   onProgress?: (processed: number, total: number) => void
 ): Promise<{ created: number; failed: number; errors: string[] }> {
-  const BATCH_SIZE = 500;
+  const BATCH_SIZE = 100; // API batch size
   let totalCreated = 0;
   let totalFailed = 0;
   const allErrors: string[] = [];
@@ -242,26 +242,40 @@ export async function processPermitsSync(records: PermitRecord[]): Promise<void>
         return;
       }
 
-      // Bulk import all permits (sorted latest first)
-      const result = await bulkProcessNewPermits(sortedRecords);
-      changed = result.created;
-      errors = result.failed;
+      // Process in batches of 1000 records
+      const PROCESSING_BATCH_SIZE = 1000;
+      const totalBatches = Math.ceil(sortedRecords.length / PROCESSING_BATCH_SIZE);
 
-      if (result.errors.length > 0) {
-        console.warn(`[SYNC] ${result.errors.length} errors during bulk import:`);
-        for (const err of result.errors.slice(0, 10)) {
-          console.warn(`  - ${err}`);
+      for (let batchIdx = 0; batchIdx < sortedRecords.length; batchIdx += PROCESSING_BATCH_SIZE) {
+        const batch = sortedRecords.slice(batchIdx, batchIdx + PROCESSING_BATCH_SIZE);
+        const batchNum = Math.floor(batchIdx / PROCESSING_BATCH_SIZE) + 1;
+
+        console.log(`\n[SYNC] ===== Processing batch ${batchNum}/${totalBatches} (${batch.length} permits) =====`);
+
+        // Bulk import this batch
+        const result = await bulkProcessNewPermits(batch);
+        changed += result.created;
+        errors += result.failed;
+
+        if (result.errors.length > 0) {
+          console.warn(`[SYNC] ${result.errors.length} errors in batch ${batchNum}:`);
+          for (const err of result.errors.slice(0, 5)) {
+            console.warn(`  - ${err}`);
+          }
+          if (result.errors.length > 5) {
+            console.warn(`  ... and ${result.errors.length - 5} more errors`);
+          }
         }
-        if (result.errors.length > 10) {
-          console.warn(`  ... and ${result.errors.length - 10} more errors`);
-        }
+
+        // Update local state for this batch
+        await upsertPermitState(batch);
+
+        console.log(`[SYNC] Batch ${batchNum} complete: ${result.created} created, ${result.failed} failed`);
+        console.log(`[SYNC] Running total: ${changed} created, ${errors} errors`);
       }
 
-      // Update local state for all records
-      await upsertPermitState(sortedRecords);
-
       await completeSyncLog(syncLogId, sortedRecords.length, changed, errors);
-      console.log(`[SYNC] Initial sync complete: ${sortedRecords.length} total, ${changed} created, ${errors} errors`);
+      console.log(`\n[SYNC] Initial sync complete: ${sortedRecords.length} total, ${changed} created, ${errors} errors`);
       return;
     }
 
