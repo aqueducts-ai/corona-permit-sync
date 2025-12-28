@@ -279,6 +279,7 @@ export async function createPermitType(
 /**
  * Get or create a permit type by name.
  * Returns the type ID.
+ * Uses "Other" as default for empty type names.
  */
 export async function getOrCreatePermitType(typeName: string): Promise<number> {
   // Ensure cache is populated
@@ -286,7 +287,9 @@ export async function getOrCreatePermitType(typeName: string): Promise<number> {
     await fetchPermitTypes();
   }
 
-  const normalizedName = typeName.toUpperCase().trim();
+  // Use "Other" as default for empty type names
+  const effectiveName = typeName && typeName.trim() !== '' ? typeName : 'Other';
+  const normalizedName = effectiveName.toUpperCase().trim();
 
   // Check cache
   const cached = permitTypesCache!.get(normalizedName);
@@ -294,8 +297,8 @@ export async function getOrCreatePermitType(typeName: string): Promise<number> {
     return cached.id;
   }
 
-  // Create new type
-  const newType = await createPermitType(typeName);
+  // Create new type (use effectiveName, not original typeName)
+  const newType = await createPermitType(effectiveName);
 
   // Update cache
   permitTypesCache!.set(normalizedName, { id: newType.id, parentId: null });
