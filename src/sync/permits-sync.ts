@@ -97,10 +97,21 @@ async function processPermitChange(change: PermitStateChange): Promise<{
       return { threefoldPermitId: updated.id, typeId, subtypeId, statusId };
     }
 
-    // Create new permit
-    const created = await createPermit(request);
-    console.log(`[PERMIT] Created: ${record.permitNo} → Threefold ID: ${created.id}`);
-    return { threefoldPermitId: created.id, typeId, subtypeId, statusId };
+    // Try to create new permit, fallback to update if already exists
+    try {
+      const created = await createPermit(request);
+      console.log(`[PERMIT] Created: ${record.permitNo} → Threefold ID: ${created.id}`);
+      return { threefoldPermitId: created.id, typeId, subtypeId, statusId };
+    } catch (err) {
+      // If permit already exists (constraint violation), try to update instead
+      const errorMsg = err instanceof Error ? err.message : '';
+      if (errorMsg.includes('already exists') || errorMsg.includes('constraint')) {
+        console.log(`[PERMIT] ${record.permitNo} already exists (caught on create), updating by permit_no...`);
+        const updated = await updatePermit(record.permitNo, request);
+        return { threefoldPermitId: updated.id, typeId, subtypeId, statusId };
+      }
+      throw err;
+    }
   } else {
     // Update existing permit
     const permitIdToUpdate = threefoldPermitId || record.permitNo;
