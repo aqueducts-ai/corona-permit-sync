@@ -1,6 +1,16 @@
 import { parse } from 'csv-parse/sync';
 import { generatePermitExternalId, normalizePermitDate } from '../utils/external-id.js';
 
+/**
+ * Sanitize a string by removing null characters and other problematic Unicode.
+ * PostgreSQL cannot store \u0000 (null byte) in text fields.
+ */
+function sanitizeString(str: string | undefined | null): string {
+  if (!str) return '';
+  // Remove null bytes and other control characters (except newlines/tabs)
+  return str.replace(/\u0000/g, '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+}
+
 export interface PermitRecord {
   permitNo: string;
   applied: string | null;
@@ -109,26 +119,32 @@ export async function parsePermitsCsv(csvContent: string): Promise<PermitRecord[
       continue;
     }
 
+    // Sanitize raw data to remove null bytes
+    const sanitizedRow: Record<string, string> = {};
+    for (const [key, value] of Object.entries(row)) {
+      sanitizedRow[key] = sanitizeString(value);
+    }
+
     permitRecords.push({
-      permitNo,
-      applied: normalizePermitDate(row['APPLIED']),
-      approved: normalizePermitDate(row['APPROVED']),
-      issued: normalizePermitDate(row['ISSUED']),
-      finaled: normalizePermitDate(row['FINALED']),
-      expired: normalizePermitDate(row['EXPIRED']),
-      permitType: row['PermitType'] || '',
-      permitSubType: row['PermitSubType'] || '',
-      status: row['STATUS'] || '',
-      siteAddress: buildAddress(row),
-      siteCity: row['SITE_CITY'] || '',
-      siteState: row['SITE_STATE'] || '',
-      siteZip: row['SITE_ZIP'] || '',
-      description: row['DESCRIPTION'] || '',
-      notes: row['NOTES'] || '',
-      jobValue: parseJobValue(row['JOBVALUE']),
-      apn: row['APN'] || '',
-      externalId: generatePermitExternalId(permitNo),
-      rawData: row,
+      permitNo: sanitizeString(permitNo),
+      applied: normalizePermitDate(sanitizedRow['APPLIED']),
+      approved: normalizePermitDate(sanitizedRow['APPROVED']),
+      issued: normalizePermitDate(sanitizedRow['ISSUED']),
+      finaled: normalizePermitDate(sanitizedRow['FINALED']),
+      expired: normalizePermitDate(sanitizedRow['EXPIRED']),
+      permitType: sanitizedRow['PermitType'] || '',
+      permitSubType: sanitizedRow['PermitSubType'] || '',
+      status: sanitizedRow['STATUS'] || '',
+      siteAddress: sanitizeString(buildAddress(sanitizedRow)),
+      siteCity: sanitizedRow['SITE_CITY'] || '',
+      siteState: sanitizedRow['SITE_STATE'] || '',
+      siteZip: sanitizedRow['SITE_ZIP'] || '',
+      description: sanitizedRow['DESCRIPTION'] || '',
+      notes: sanitizedRow['NOTES'] || '',
+      jobValue: parseJobValue(sanitizedRow['JOBVALUE']),
+      apn: sanitizedRow['APN'] || '',
+      externalId: generatePermitExternalId(sanitizeString(permitNo)),
+      rawData: sanitizedRow,
     });
   }
 
