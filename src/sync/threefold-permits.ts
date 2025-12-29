@@ -67,12 +67,15 @@ async function handleRateLimit(response: Response): Promise<void> {
 
 /**
  * Make an API request with rate limit handling and retries.
+ * Retries on 429 (rate limit) and 500 (server error).
  */
 async function apiRequest(
   url: string,
   options: RequestInit,
   maxRetries = 3
 ): Promise<Response> {
+  let lastError: Error | null = null;
+
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     await rateLimitedRequest();
 
@@ -93,6 +96,19 @@ async function apiRequest(
         `Rate limit exceeded after ${maxRetries} retries. ` +
         `Reset at: ${resetTime || 'unknown'}. Please wait and try again.`
       );
+    }
+
+    // Retry on 500 server errors (transient)
+    if (response.status === 500) {
+      const body = await response.text();
+      if (attempt < maxRetries - 1) {
+        const waitTime = (attempt + 1) * 2000; // 2s, 4s, 6s
+        console.log(`[API] 500 error, retrying in ${waitTime / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        continue;
+      }
+      // On last attempt, throw with the error body
+      throw new Error(`Server error after ${maxRetries} retries: 500 ${body}`);
     }
 
     return response;
