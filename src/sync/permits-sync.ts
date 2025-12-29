@@ -15,6 +15,7 @@ import {
   updatePermit,
   getPermitByNumber,
   bulkCreatePermits,
+  clearPermitCaches,
 } from './threefold-permits.js';
 import { config } from '../config.js';
 
@@ -75,8 +76,12 @@ function logChangesSummary(changes: PermitStateChange[]): void {
 
 /**
  * Process a single permit change (new or updated).
+ * Includes retry logic for stale cache errors.
  */
-async function processPermitChange(change: PermitStateChange): Promise<{
+async function processPermitChange(
+  change: PermitStateChange,
+  retryCount = 0
+): Promise<{
   threefoldPermitId: number;
   typeId: number;
   subtypeId: number | null;
@@ -84,40 +89,59 @@ async function processPermitChange(change: PermitStateChange): Promise<{
 }> {
   const { record, isNew, threefoldPermitId } = change;
 
-  // Convert record to API request (resolves type/subtype/status IDs)
-  const { request, typeId, subtypeId, statusId } = await convertPermitRecordToApiRequest(record);
+  try {
+    // Convert record to API request (resolves type/subtype/status IDs)
+    const { request, typeId, subtypeId, statusId } = await convertPermitRecordToApiRequest(record);
 
-  if (isNew) {
-    // Check if permit already exists in Threefold (edge case: cached ID missing)
-    const existing = await getPermitByNumber(record.permitNo);
-    if (existing) {
-      // Permit exists, update it instead
-      console.log(`[PERMIT] ${record.permitNo} already exists in Threefold (ID: ${existing.id}), updating...`);
-      const updated = await updatePermit(existing.id, request);
-      return { threefoldPermitId: updated.id, typeId, subtypeId, statusId };
-    }
-
-    // Try to create new permit, fallback to update if already exists
-    try {
-      const created = await createPermit(request);
-      console.log(`[PERMIT] Created: ${record.permitNo} → Threefold ID: ${created.id}`);
-      return { threefoldPermitId: created.id, typeId, subtypeId, statusId };
-    } catch (err) {
-      // If permit already exists (constraint violation), try to update instead
-      const errorMsg = err instanceof Error ? err.message : '';
-      if (errorMsg.includes('already exists') || errorMsg.includes('constraint')) {
-        console.log(`[PERMIT] ${record.permitNo} already exists (caught on create), updating by permit_no...`);
-        const updated = await updatePermit(record.permitNo, request);
+    if (isNew) {
+      // Check if permit already exists in Threefold (edge case: cached ID missing)
+      const existing = await getPermitByNumber(record.permitNo);
+      if (existing) {
+        // Permit exists, update it instead
+        console.log(`[PERMIT] ${record.permitNo} already exists in Threefold (ID: ${existing.id}), updating...`);
+        const updated = await updatePermit(existing.id, request);
         return { threefoldPermitId: updated.id, typeId, subtypeId, statusId };
       }
-      throw err;
+
+      // Try to create new permit, fallback to update if already exists
+      try {
+        const created = await createPermit(request);
+        console.log(`[PERMIT] Created: ${record.permitNo} → Threefold ID: ${created.id}`);
+        return { threefoldPermitId: created.id, typeId, subtypeId, statusId };
+      } catch (err) {
+        // If permit already exists (constraint violation), try to update instead
+        const errorMsg = err instanceof Error ? err.message : '';
+        if (errorMsg.includes('already exists') || errorMsg.includes('constraint')) {
+          console.log(`[PERMIT] ${record.permitNo} already exists (caught on create), updating by permit_no...`);
+          const updated = await updatePermit(record.permitNo, request);
+          return { threefoldPermitId: updated.id, typeId, subtypeId, statusId };
+        }
+        throw err;
+      }
+    } else {
+      // Update existing permit
+      const permitIdToUpdate = threefoldPermitId || record.permitNo;
+      const updated = await updatePermit(permitIdToUpdate, request);
+      console.log(`[PERMIT] Updated: ${record.permitNo} (ID: ${updated.id})`);
+      return { threefoldPermitId: updated.id, typeId, subtypeId, statusId };
     }
-  } else {
-    // Update existing permit
-    const permitIdToUpdate = threefoldPermitId || record.permitNo;
-    const updated = await updatePermit(permitIdToUpdate, request);
-    console.log(`[PERMIT] Updated: ${record.permitNo} (ID: ${updated.id})`);
-    return { threefoldPermitId: updated.id, typeId, subtypeId, statusId };
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : '';
+
+    // If type/subtype/status ID doesn't exist, refresh cache and retry once
+    if (retryCount === 0 && (
+      errorMsg.includes('does not exist') ||
+      errorMsg.includes('type_id') ||
+      errorMsg.includes('subtype_id') ||
+      errorMsg.includes('status_id')
+    )) {
+      console.log(`[PERMIT] ${record.permitNo}: Stale cache detected, refreshing and retrying...`);
+      clearPermitCaches();
+      await initializePermitCaches();
+      return processPermitChange(change, retryCount + 1);
+    }
+
+    throw err;
   }
 }
 
