@@ -10,6 +10,10 @@ const { Pool } = pg;
 const pool = new Pool({
   connectionString: config.databaseUrl,
   ssl: config.nodeEnv === 'production' ? { rejectUnauthorized: false } : false,
+  // Limit connections to reduce memory usage
+  max: 5, // Max 5 connections (default is 10)
+  idleTimeoutMillis: 30000, // Close idle connections after 30s
+  connectionTimeoutMillis: 10000, // Timeout connecting after 10s
 });
 
 /**
