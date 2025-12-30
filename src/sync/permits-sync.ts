@@ -307,6 +307,9 @@ export async function processPermitsSync(records: PermitRecord[]): Promise<void>
 
         console.log(`[SYNC] Batch ${batchNum} complete: ${result.created} created, ${result.failed} failed`);
         console.log(`[SYNC] Running total: ${changed} created, ${errors} errors`);
+
+        // Clear caches between batches to free memory
+        clearPermitCaches();
       }
 
       await completeSyncLog(syncLogId, sortedRecords.length, changed, errors);
@@ -365,8 +368,13 @@ export async function processPermitsSync(records: PermitRecord[]): Promise<void>
 
     await completeSyncLog(syncLogId, sortedRecords.length, changed, errors);
     console.log(`[SYNC] Permits sync complete: ${sortedRecords.length} total, ${changed} processed, ${errors} errors`);
+
+    // Clear caches to free memory
+    clearPermitCaches();
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+    // Clear caches even on error
+    clearPermitCaches();
     await completeSyncLog(syncLogId, records.length, changed, errors, errorMessage);
     throw err;
   }

@@ -144,7 +144,8 @@ export async function parsePermitsCsv(csvContent: string): Promise<PermitRecord[
       jobValue: parseJobValue(sanitizedRow['JOBVALUE']),
       apn: sanitizedRow['APN'] || '',
       externalId: generatePermitExternalId(sanitizeString(permitNo)),
-      rawData: sanitizedRow,
+      // Don't store full row to save memory - all needed fields are extracted above
+      rawData: {},
     });
   }
 
